@@ -47,6 +47,8 @@ patternProperties:
 required:
   - compatible
 
+additionalProperties: false
+
 examples:
   - |
     ltc2358: ltc2358@0 {

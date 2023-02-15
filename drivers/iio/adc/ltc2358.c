@@ -4,6 +4,8 @@
  *
  * Copyright 2023 Analog Devices Inc.
  */
+
+#include <asm/unaligned.h>
 #include <linux/device.h>
 #include <linux/err.h>
 #include <linux/iio/iio.h>
@@ -21,7 +23,7 @@
 #define T_CONVH			40
 #define T_QUIET			20
 #define LTC2358_CREATE_CONFIG_WORD(channel, config_number, config_word)		\
-	*(config_word) |= ((uint32_t)(config_number & LTC2358_CHANNEL_MSK)	\
+	(*config_word) |= ((u32)(config_number & LTC2358_CHANNEL_MSK)		\
 			<< ((channel) * LTC2358_BYTES_PER_CH))
 
 struct ltc2358_state {
