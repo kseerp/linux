@@ -17,20 +17,6 @@ pool:
 
 jobs:
 
-- job: sync_branches_with_main
-  condition: and(ne(variables['Build.Reason'], 'PullRequest'), eq(variables.isMain, true))
-  variables:
-    BUILD_TYPE: sync_branches_with_main
-    MAIN_BRANCH: $[ variables['Build.SourceBranchName'] ]
-    CI: true
-  steps:
-  - checkout: self
-    fetchDepth: 50
-    clean: true
-    persistCredentials: true
-  - script: ./ci/travis/run-build.sh
-    displayName: 'Sync Branches With Main Branch'
-
 - job: checkpatch
   condition: eq(variables['Build.Reason'], 'PullRequest')
   variables:
@@ -76,18 +62,6 @@ jobs:
       ./ci/travis/run-build.sh
     displayName: 'Bindings Check Script'
 
-- job: check_new_file_license
-  condition: eq(variables['Build.Reason'], 'PullRequest')
-  variables:
-    BUILD_TYPE: check_new_file_license
-    TARGET_BRANCH: $[ variables['System.PullRequest.TargetBranch'] ]
-  steps:
-  - checkout: self
-    fetchDepth: 50
-    clean: true
-  - script: ./ci/travis/run-build.sh
-    displayName: 'Check Is New ADI Driver & Dual Licensed'
-
 - job: dtb_build_test
   variables:
     BUILD_TYPE: dtb_build_test
@@ -103,41 +77,3 @@ jobs:
     clean: true
   - script: ./ci/travis/run-build.sh
     displayName: 'Device-Tree Build Test'
-
-- job: BuildDockerized
-  strategy:
-    matrix:
-      zynq_adi_default:
-        DEFCONFIG: zynq_xcomm_adv7511_defconfig
-        ARCH: arm
-        IMAGE: uImage
-        CHECK_ALL_ADI_DRIVERS_HAVE_BEEN_BUILT: 1
-      socfpga_adi_default:
-        DEFCONFIG: socfpga_adi_defconfig
-        ARCH: arm
-        IMAGE: zImage
-        CHECK_ALL_ADI_DRIVERS_HAVE_BEEN_BUILT: 1
-      zynqmp_adi_default:
-        DEFCONFIG: adi_zynqmp_defconfig
-        ARCH: arm64
-        IMAGE: Image
-        CHECK_ALL_ADI_DRIVERS_HAVE_BEEN_BUILT: 1
-      versal_adi_default:
-        DEFCONFIG: adi_versal_defconfig
-        ARCH: arm64
-        IMAGE: Image
-        CHECK_ALL_ADI_DRIVERS_HAVE_BEEN_BUILT: 1
-      zynq_pluto:
-        DEFCONFIG: zynq_pluto_defconfig
-        ARCH: arm
-        IMAGE: uImage
-      zynq_m2k:
-        DEFCONFIG: zynq_m2k_defconfig
-        ARCH: arm
-        IMAGE: uImage
-  steps:
-  - checkout: self
-    fetchDepth: 1
-    clean: true
-  - script: ./ci/travis/run-build-docker.sh
-    displayName: "Build test for '$(DEFCONFIG)'"
