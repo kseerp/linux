@@ -154,22 +154,10 @@
 	 ADRV9002_GP_MASK_TX_DP_TRANSMIT_ERROR |		\
 	 ADRV9002_GP_MASK_RX_DP_RECEIVE_ERROR)
 
-/* ADI_ADRV9001_MAX_ILB_ONLY not taken into account */
-#define ADRV9002_PORTS_CNT	\
-	(ADRV9002_CHANN_MAX * 2 + ADI_ADRV9001_MAX_ORX_ONLY + ADI_ADRV9001_MAX_ELB_ONLY)
-#define ADRV9002_ORX_OFFSET	(ADRV9002_CHANN_MAX * 2)
-#define ADRV9002_ELB_OFFSET	(ADRV9002_ORX_OFFSET + ADI_ADRV9001_MAX_ORX_ONLY)
-
-enum {
-	ADRV9002_RX1_BIT_NR,
-	ADRV9002_RX2_BIT_NR,
-	ADRV9002_TX1_BIT_NR,
-	ADRV9002_TX2_BIT_NR,
-	ADRV9002_ORX1_BIT_NR,
-	ADRV9002_ORX2_BIT_NR,
-	ADRV9002_ELB1_BIT_NR = 8,
-	ADRV9002_ELB2_BIT_NR
-};
+#define ADRV9002_RX_BIT_START		(ffs(ADI_ADRV9001_RX1) - 1)
+#define ADRV9002_TX_BIT_START		(ffs(ADI_ADRV9001_TX1) - 1)
+#define ADRV9002_ORX_BIT_START		(ffs(ADI_ADRV9001_ORX1) - 1)
+#define ADRV9002_ELB_BIT_START		(ffs(ADI_ADRV9001_ELB1) - 1)
 
 enum {
 	ADRV9002_TX_A,
@@ -2622,7 +2610,7 @@ static int adrv9002_init_cals_handle(struct adrv9002_rf_phy *phy)
 		return ret;
 
 	ret = api_call(phy, adi_adrv9001_cals_InitCals_WarmBoot_Coefficients_UniqueArray_Set,
-		       fw->data, phy->init_cals.chanInitCalMask[0],
+		       (u8 *)fw->data, phy->init_cals.chanInitCalMask[0],
 		       phy->init_cals.chanInitCalMask[1]);
 	release_firmware(fw);
 	if (ret)
@@ -2859,6 +2847,135 @@ static int adrv9002_ext_lo_validate(struct adrv9002_rf_phy *phy, int idx, bool t
 	return lo;
 }
 
+static int adrv9002_rx_validate_profile(struct adrv9002_rf_phy *phy, unsigned int idx,
+					const struct adi_adrv9001_RxChannelCfg *rx_cfg)
+{
+	struct device *dev = &phy->spi->dev;
+
+	if (phy->ssi_type != rx_cfg[idx].profile.rxSsiConfig.ssiType) {
+		dev_err(dev, "SSI interface mismatch. PHY=%d, RX%d=%d\n",
+			phy->ssi_type, idx + 1, rx_cfg[idx].profile.rxSsiConfig.ssiType);
+		return -EINVAL;
+	}
+
+	if (phy->ssi_type == ADI_ADRV9001_SSI_TYPE_LVDS && !rx_cfg[idx].profile.rxSsiConfig.ddrEn) {
+		dev_err(dev, "RX%d: Single Data Rate port not supported for LVDS\n",
+			idx + 1);
+		return -EINVAL;
+	}
+
+	if (rx_cfg[idx].profile.rxSsiConfig.strobeType == ADI_ADRV9001_SSI_LONG_STROBE) {
+		dev_err(dev, "SSI interface Long Strobe not supported\n");
+		return -EINVAL;
+	}
+
+	if (!phy->rx2tx2 || !idx)
+		return 0;
+
+	if (rx_cfg[idx].profile.rxOutputRate_Hz != phy->rx_channels[0].channel.rate) {
+		dev_err(dev, "In rx2tx2, RX%d rate=%u must be equal to RX1, rate=%ld\n", idx + 1,
+			rx_cfg[idx].profile.rxOutputRate_Hz, phy->rx_channels[0].channel.rate);
+		return -EINVAL;
+	}
+
+	if (!phy->rx_channels[0].channel.enabled) {
+		dev_err(dev, "In rx2tx2, RX%d cannot be enabled while RX1 is disabled", idx + 1);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int adrv9002_tx_validate_profile(struct adrv9002_rf_phy *phy, unsigned int idx,
+					const struct adi_adrv9001_TxProfile *tx_cfg)
+{
+	struct adrv9002_tx_chan *tx = &phy->tx_channels[idx];
+	struct device *dev = &phy->spi->dev;
+	struct adrv9002_rx_chan *rx;
+
+	/* check @tx_only comments in adrv9002.h to better understand the next checks */
+	if (phy->ssi_type != tx_cfg[idx].txSsiConfig.ssiType) {
+		dev_err(dev, "SSI interface mismatch. PHY=%d, TX%d=%d\n",
+			phy->ssi_type, idx + 1,  tx_cfg[idx].txSsiConfig.ssiType);
+		return -EINVAL;
+	}
+
+	if (phy->ssi_type == ADI_ADRV9001_SSI_TYPE_LVDS && !tx_cfg[idx].txSsiConfig.ddrEn) {
+		dev_err(dev, "TX%d: Single Data Rate port not supported for LVDS\n", idx + 1);
+		return -EINVAL;
+	}
+
+	if (tx_cfg[idx].txSsiConfig.strobeType == ADI_ADRV9001_SSI_LONG_STROBE) {
+		dev_err(dev, "SSI interface Long Strobe not supported\n");
+		return -EINVAL;
+	}
+
+	if (phy->rx2tx2) {
+		struct adrv9002_chan *rx1 = &phy->rx_channels[0].channel;
+		struct adrv9002_chan *tx1 = &phy->tx_channels[0].channel;
+
+		/*
+		 * In rx2tx2 mode, if TX uses RX as the reference clock, we just need to
+		 * validate against RX1 since in this mode RX2 cannot be enabled without RX1. The
+		 * same goes for the rate that must be the same.
+		 */
+		if (tx->rx_ref_clk && !rx1->enabled) {
+			/*
+			 * pretty much means that in this case either all channels are
+			 * disabled, which obviously does not make sense, or RX1 must
+			 * be enabled...
+			 */
+			dev_err(dev, "In rx2tx2, TX%d cannot be enabled while RX1 is disabled",
+				idx + 1);
+			return -EINVAL;
+		}
+
+		if (tx->rx_ref_clk  && tx_cfg[idx].txInputRate_Hz != rx1->rate) {
+			/*
+			 * pretty much means that in this case, all ports must have
+			 * the same rate. We match against RX1 since RX2 can be disabled
+			 * even if it does not make much sense to disable it in rx2tx2 mode
+			 */
+			dev_err(dev, "In rx2tx2, TX%d rate=%u must be equal to RX1, rate=%ld\n",
+				idx + 1, tx_cfg[idx].txInputRate_Hz, rx1->rate);
+			return -EINVAL;
+		}
+
+		if (!tx->rx_ref_clk  && idx && tx_cfg[idx].txInputRate_Hz != tx1->rate) {
+			dev_err(dev, "In rx2tx2, TX%d rate=%u must be equal to TX1, rate=%ld\n",
+				idx + 1, tx_cfg[idx].txInputRate_Hz, tx1->rate);
+			return -EINVAL;
+		}
+
+		if (idx && !tx1->enabled) {
+			dev_err(dev, "In rx2tx2, TX%d cannot be enabled while TX1 is disabled",
+				idx + 1);
+			return -EINVAL;
+		}
+
+		return 0;
+	}
+
+	if (!tx->rx_ref_clk)
+		return 0;
+
+	/* Alright, RX clock is driving us... */
+	rx = &phy->rx_channels[tx->rx_ref_clk - 1];
+	if (!rx->channel.enabled) {
+		dev_err(dev, "TX%d cannot be enabled while RX%d is disabled", idx + 1,
+			rx->channel.number);
+		return -EINVAL;
+	}
+
+	if (tx_cfg[idx].txInputRate_Hz != rx->channel.rate) {
+		dev_err(dev, "TX%d rate=%u must be equal to RX%d, rate=%ld\n", idx + 1,
+			tx_cfg[idx].txInputRate_Hz, rx->channel.number, rx->channel.rate);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 static int adrv9002_validate_profile(struct adrv9002_rf_phy *phy)
 {
 	const struct adi_adrv9001_RxChannelCfg *rx_cfg = phy->curr_profile->rx.rxChannelCfg;
@@ -2866,56 +2983,22 @@ static int adrv9002_validate_profile(struct adrv9002_rf_phy *phy)
 	struct adi_adrv9001_ClockSettings *clks = &phy->curr_profile->clocks;
 	unsigned long rx_mask = phy->curr_profile->rx.rxInitChannelMask;
 	unsigned long tx_mask = phy->curr_profile->tx.txInitChannelMask;
-	const u32 ports[ADRV9002_PORTS_CNT] = {
-		ADRV9002_RX1_BIT_NR, ADRV9002_TX1_BIT_NR, ADRV9002_RX2_BIT_NR,
-		ADRV9002_TX2_BIT_NR, ADRV9002_ORX1_BIT_NR, ADRV9002_ORX2_BIT_NR,
-		ADRV9002_ELB1_BIT_NR, ADRV9002_ELB2_BIT_NR
-	};
-	int i, lo;
+	int i, lo, ret;
 
 	for (i = 0; i < ADRV9002_CHANN_MAX; i++) {
-		struct adrv9002_tx_chan *tx = &phy->tx_channels[i];
 		struct adrv9002_rx_chan *rx = &phy->rx_channels[i];
 
 		/* rx validations */
-		if (!test_bit(ports[i * 2], &rx_mask))
-			goto tx;
+		if (!test_bit(ADRV9002_RX_BIT_START + i, &rx_mask))
+			continue;
 
 		lo = adrv9002_ext_lo_validate(phy, i, false);
 		if (lo < 0)
 			return lo;
 
-		if (phy->rx2tx2 && i &&
-		    rx_cfg[i].profile.rxOutputRate_Hz != phy->rx_channels[0].channel.rate) {
-			dev_err(&phy->spi->dev, "In rx2tx2, RX%d rate=%u must be equal to RX1, rate=%ld\n",
-				i + 1, rx_cfg[i].profile.rxOutputRate_Hz,
-				phy->rx_channels[0].channel.rate);
-			return -EINVAL;
-		}
-
-		if (phy->rx2tx2 && i && !phy->rx_channels[0].channel.enabled) {
-			dev_err(&phy->spi->dev, "In rx2tx2, RX%d cannot be enabled while RX1 is disabled",
-				i + 1);
-			return -EINVAL;
-		}
-
-		if (phy->ssi_type != rx_cfg[i].profile.rxSsiConfig.ssiType) {
-			dev_err(&phy->spi->dev, "SSI interface mismatch. PHY=%d, RX%d=%d\n",
-				phy->ssi_type, i + 1, rx_cfg[i].profile.rxSsiConfig.ssiType);
-			return -EINVAL;
-		}
-
-		if (rx_cfg[i].profile.rxSsiConfig.strobeType == ADI_ADRV9001_SSI_LONG_STROBE) {
-			dev_err(&phy->spi->dev, "SSI interface Long Strobe not supported\n");
-			return -EINVAL;
-		}
-
-		if (phy->ssi_type == ADI_ADRV9001_SSI_TYPE_LVDS &&
-		    !rx_cfg[i].profile.rxSsiConfig.ddrEn) {
-			dev_err(&phy->spi->dev, "RX%d: Single Data Rate port not supported for LVDS\n",
-				i + 1);
-			return -EINVAL;
-		}
+		ret = adrv9002_rx_validate_profile(phy, i, rx_cfg);
+		if (ret)
+			return ret;
 
 		dev_dbg(&phy->spi->dev, "RX%d enabled\n", i + 1);
 		rx->channel.power = true;
@@ -2926,95 +3009,31 @@ static int adrv9002_validate_profile(struct adrv9002_rf_phy *phy)
 			rx->channel.ext_lo = &phy->ext_los[lo];
 		rx->channel.lo = i ? clks->rx2LoSelect : clks->rx1LoSelect;
 		rx->channel.lo_cals = ADI_ADRV9001_INIT_LO_RETUNE & ~ADI_ADRV9001_INIT_CAL_TX_ALL;
-tx:
-		/* tx validations*/
-		if (!test_bit(ports[i * 2 + 1], &tx_mask))
-			continue;
+	}
 
-		if (i >= phy->chip->n_tx) {
-			dev_err(&phy->spi->dev, "TX%d not supported for this device\n", i + 1);
-			return -EINVAL;
-		}
+	for (i = 0; i < phy->chip->n_tx; i++) {
+		struct adrv9002_tx_chan *tx = &phy->tx_channels[i];
+		struct adrv9002_rx_chan *rx = &phy->rx_channels[i];
+
+		if (!test_bit(ADRV9002_TX_BIT_START + i, &tx_mask))
+			continue;
 
 		lo = adrv9002_ext_lo_validate(phy, i, true);
 		if (lo < 0)
 			return lo;
 
-		/* check @tx_only comments in adrv9002.h to better understand the next checks */
-		if (phy->ssi_type != tx_cfg[i].txSsiConfig.ssiType) {
-			dev_err(&phy->spi->dev, "SSI interface mismatch. PHY=%d, TX%d=%d\n",
-				phy->ssi_type, i + 1,  tx_cfg[i].txSsiConfig.ssiType);
-			return -EINVAL;
-		}
-
-		if (tx_cfg[i].txSsiConfig.strobeType == ADI_ADRV9001_SSI_LONG_STROBE) {
-			dev_err(&phy->spi->dev, "SSI interface Long Strobe not supported\n");
-			return -EINVAL;
-		}
-
-		if (phy->ssi_type == ADI_ADRV9001_SSI_TYPE_LVDS &&
-		    !tx_cfg[i].txSsiConfig.ddrEn) {
-			dev_err(&phy->spi->dev, "TX%d: Single Data Rate port not supported for LVDS\n",
-				i + 1);
-			return -EINVAL;
-		}
-
-		if (phy->rx2tx2) {
-			if (!phy->tx_only && !phy->rx_channels[0].channel.enabled) {
-				/*
-				 * pretty much means that in this case either all channels are
-				 * disabled, which obviously does not make sense, or RX1 must
-				 * be enabled...
-				 */
-				dev_err(&phy->spi->dev, "In rx2tx2, TX%d cannot be enabled while RX1 is disabled",
-					i + 1);
-				return -EINVAL;
-			}
-
-			if (i && !phy->tx_channels[0].channel.enabled) {
-				dev_err(&phy->spi->dev, "In rx2tx2, TX%d cannot be enabled while TX1 is disabled",
-					i + 1);
-				return -EINVAL;
-			}
-
-			if (!phy->tx_only &&
-			    tx_cfg[i].txInputRate_Hz != phy->rx_channels[0].channel.rate) {
-				/*
-				 * pretty much means that in this case, all ports must have
-				 * the same rate. We match against RX1 since RX2 can be disabled
-				 * even if it does not make much sense to disable it in rx2tx2 mode
-				 */
-				dev_err(&phy->spi->dev, "In rx2tx2, TX%d rate=%u must be equal to RX1, rate=%ld\n",
-					i + 1, tx_cfg[i].txInputRate_Hz,
-					phy->rx_channels[0].channel.rate);
-				return -EINVAL;
-			}
-
-			if (phy->tx_only && i &&
-			    tx_cfg[i].txInputRate_Hz != phy->tx_channels[0].channel.rate) {
-				dev_err(&phy->spi->dev, "In rx2tx2, TX%d rate=%u must be equal to TX1, rate=%ld\n",
-					i + 1, tx_cfg[i].txInputRate_Hz,
-					phy->tx_channels[0].channel.rate);
-				return -EINVAL;
-			}
-		} else if (!phy->tx_only && !rx->channel.enabled) {
-			dev_err(&phy->spi->dev, "TX%d cannot be enabled while RX%d is disabled",
-				i + 1, i + 1);
-			return -EINVAL;
-		} else if (!phy->tx_only && tx_cfg[i].txInputRate_Hz != rx->channel.rate) {
-			dev_err(&phy->spi->dev, "TX%d rate=%u must be equal to RX%d, rate=%ld\n",
-				i + 1, tx_cfg[i].txInputRate_Hz, i + 1, rx->channel.rate);
-			return -EINVAL;
-		}
+		ret = adrv9002_tx_validate_profile(phy, i, tx_cfg);
+		if (ret)
+			return ret;
 
 		dev_dbg(&phy->spi->dev, "TX%d enabled\n", i + 1);
 		/* orx actually depends on whether or not TX is enabled and not RX */
-		rx->orx_en = test_bit(ports[ADRV9002_ORX_OFFSET + i], &rx_mask);
+		rx->orx_en = test_bit(ADRV9002_ORX_BIT_START + i, &rx_mask);
 		tx->channel.power = true;
 		tx->channel.enabled = true;
 		tx->channel.nco_freq = 0;
 		tx->channel.rate = tx_cfg[i].txInputRate_Hz;
-		tx->elb_en = test_bit(ports[ADRV9002_ELB_OFFSET + i], &rx_mask);
+		tx->elb_en = test_bit(ADRV9002_ELB_BIT_START + i, &rx_mask);
 		if (lo < ADI_ADRV9001_LOSEL_LO2)
 			tx->channel.ext_lo = &phy->ext_los[lo];
 		tx->channel.lo = i ? clks->tx2LoSelect : clks->tx1LoSelect;
@@ -3159,6 +3178,39 @@ static u64 adrv9002_get_init_carrier(const struct adrv9002_chan *c)
 	return DIV_ROUND_CLOSEST_ULL(lo_freq, c->ext_lo->divider);
 }
 
+static int adrv9002_ext_lna_set(const struct adrv9002_rf_phy *phy,
+				struct adrv9002_rx_chan *rx)
+{
+	struct adi_adrv9001_RxChannelCfg *rx_cfg = phy->curr_profile->rx.rxChannelCfg;
+	struct adi_adrv9001_RxProfile *p = &rx_cfg[rx->channel.idx].profile;
+	int ret;
+
+	if (!p->lnaConfig.externalLnaPresent)
+		return 0;
+
+	ret = api_call(phy, adi_adrv9001_Rx_ExternalLna_Configure, rx->channel.number,
+		       &p->lnaConfig, p->gainTableType);
+	if (ret)
+		return ret;
+
+	/* min gain index may have changed */
+	rx->agc.minGainIndex =  p->lnaConfig.minGainIndex;
+	/*
+	 * Also make sure to update the AGC LNA settling delay. Otherwise we would overwrite it
+	 * when configuring AGC.
+	 */
+	rx->agc.extLna.settlingDelay = p->lnaConfig.settlingDelay;
+	return 0;
+}
+
+static int adrv9002_init_dpd(const struct adrv9002_rf_phy *phy, const struct adrv9002_tx_chan *tx)
+{
+	if (!tx->elb_en || !tx->dpd_init || !tx->dpd_init->enable)
+		return 0;
+
+	return api_call(phy, adi_adrv9001_dpd_Initial_Configure, tx->channel.number, tx->dpd_init);
+}
+
 /*
  * All of these structures are taken from TES when exporting the default profile to C code. Consider
  * about having all of these configurable through devicetree.
@@ -3199,6 +3251,11 @@ static int adrv9002_radio_init(const struct adrv9002_rf_phy *phy)
 		if (!c->enabled)
 			continue;
 
+		if (c->port == ADI_RX) {
+			ret = adrv9002_ext_lna_set(phy, chan_to_rx(c));
+			if (ret)
+				return ret;
+		}
 		/*
 		 * For some low rate profiles, the intermediate frequency is non 0.
 		 * In these cases, forcing it 0, will cause a firmware error. Hence, we need to
@@ -3223,13 +3280,7 @@ static int adrv9002_radio_init(const struct adrv9002_rf_phy *phy)
 			return ret;
 
 		if (c->port == ADI_TX) {
-			struct adrv9002_tx_chan *tx = chan_to_tx(c);
-
-			if (!tx->elb_en || !tx->dpd_init || !tx->dpd_init->enable)
-				continue;
-
-			ret = api_call(phy, adi_adrv9001_dpd_Initial_Configure,
-				       c->number, tx->dpd_init);
+			ret = adrv9002_init_dpd(phy, chan_to_tx(c));
 			if (ret)
 				return ret;
 		}

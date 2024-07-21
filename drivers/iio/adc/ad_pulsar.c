@@ -211,6 +211,15 @@ static const struct ad_pulsar_chip_info ad7699_chip_info = {
 	.cfg_register = true
 };
 
+static const struct ad_pulsar_chip_info ad7694_chip_info = {
+	.name = "ad7694",
+	.input_type = DIFFERENTIAL,
+	.max_rate = 250000,
+	.resolution = 16,
+	.num_channels = 1,
+	.sclk_rate = 40000000
+};
+
 static const struct ad_pulsar_chip_info ad7693_chip_info = {
 	.name = "ad7693",
 	.input_type = DIFFERENTIAL,
@@ -280,6 +289,24 @@ static const struct ad_pulsar_chip_info ad7685_chip_info = {
 	.name = "ad7685",
 	.input_type = SINGLE_ENDED,
 	.max_rate = 250000,
+	.resolution = 16,
+	.num_channels = 1,
+	.sclk_rate = 40000000
+};
+
+static const struct ad_pulsar_chip_info ad7684_chip_info = {
+	.name = "ad7684",
+	.input_type = DIFFERENTIAL,
+	.max_rate = 100000,
+	.resolution = 16,
+	.num_channels = 1,
+	.sclk_rate = 40000000
+};
+
+static const struct ad_pulsar_chip_info ad7683_chip_info = {
+	.name = "ad7683",
+	.input_type = SINGLE_ENDED,
+	.max_rate = 100000,
 	.resolution = 16,
 	.num_channels = 1,
 	.sclk_rate = 40000000
@@ -898,6 +925,7 @@ static const struct of_device_id ad_pulsar_of_match[] = {
 	{ .compatible = "adi,pulsar,ad7946", .data = &ad7946_chip_info },
 	{ .compatible = "adi,pulsar,ad7942", .data = &ad7942_chip_info },
 	{ .compatible = "adi,pulsar,ad7699", .data = &ad7699_chip_info },
+	{ .compatible = "adi,pulsar,ad7694", .data = &ad7694_chip_info },
 	{ .compatible = "adi,pulsar,ad7693", .data = &ad7693_chip_info },
 	{ .compatible = "adi,pulsar,ad7691", .data = &ad7691_chip_info },
 	{ .compatible = "adi,pulsar,ad7690", .data = &ad7690_chip_info },
@@ -906,31 +934,36 @@ static const struct of_device_id ad_pulsar_of_match[] = {
 	{ .compatible = "adi,pulsar,ad7687", .data = &ad7687_chip_info },
 	{ .compatible = "adi,pulsar,ad7686", .data = &ad7686_chip_info },
 	{ .compatible = "adi,pulsar,ad7685", .data = &ad7685_chip_info },
+	{ .compatible = "adi,pulsar,ad7684", .data = &ad7684_chip_info },
+	{ .compatible = "adi,pulsar,ad7683", .data = &ad7683_chip_info },
 	{ .compatible = "adi,pulsar,ad7682", .data = &ad7682_chip_info },
 	{ },
 };
 MODULE_DEVICE_TABLE(of, ad_pulsar_of_match);
 
 static const struct spi_device_id ad_pulsar_spi_id[] = {
-	{ "adi,pulsar,ad7988-5", (kernel_ulong_t)&ad7988_5_chip_info },
-	{ "adi,pulsar,ad7988-1", (kernel_ulong_t)&ad7988_1_chip_info },
-	{ "adi,pulsar,ad7984", (kernel_ulong_t)&ad7984_chip_info },
-	{ "adi,pulsar,ad7983", (kernel_ulong_t)&ad7983_chip_info },
-	{ "adi,pulsar,ad7982", (kernel_ulong_t)&ad7982_chip_info },
-	{ "adi,pulsar,ad7980", (kernel_ulong_t)&ad7980_chip_info },
-	{ "adi,pulsar,ad7949", (kernel_ulong_t)&ad7949_chip_info },
-	{ "adi,pulsar,ad7946", (kernel_ulong_t)&ad7946_chip_info },
-	{ "adi,pulsar,ad7942", (kernel_ulong_t)&ad7942_chip_info },
-	{ "adi,pulsar,ad7699", (kernel_ulong_t)&ad7699_chip_info },
-	{ "adi,pulsar,ad7693", (kernel_ulong_t)&ad7693_chip_info },
-	{ "adi,pulsar,ad7691", (kernel_ulong_t)&ad7691_chip_info },
-	{ "adi,pulsar,ad7690", (kernel_ulong_t)&ad7690_chip_info },
-	{ "adi,pulsar,ad7689", (kernel_ulong_t)&ad7689_chip_info },
-	{ "adi,pulsar,ad7688", (kernel_ulong_t)&ad7688_chip_info },
-	{ "adi,pulsar,ad7687", (kernel_ulong_t)&ad7687_chip_info },
-	{ "adi,pulsar,ad7686", (kernel_ulong_t)&ad7686_chip_info },
-	{ "adi,pulsar,ad7685", (kernel_ulong_t)&ad7685_chip_info },
-	{ "adi,pulsar,ad7682", (kernel_ulong_t)&ad7682_chip_info },
+	{ "pulsar,ad7988-5", (kernel_ulong_t)&ad7988_5_chip_info },
+	{ "pulsar,ad7988-1", (kernel_ulong_t)&ad7988_1_chip_info },
+	{ "pulsar,ad7984", (kernel_ulong_t)&ad7984_chip_info },
+	{ "pulsar,ad7983", (kernel_ulong_t)&ad7983_chip_info },
+	{ "pulsar,ad7982", (kernel_ulong_t)&ad7982_chip_info },
+	{ "pulsar,ad7980", (kernel_ulong_t)&ad7980_chip_info },
+	{ "pulsar,ad7949", (kernel_ulong_t)&ad7949_chip_info },
+	{ "pulsar,ad7946", (kernel_ulong_t)&ad7946_chip_info },
+	{ "pulsar,ad7942", (kernel_ulong_t)&ad7942_chip_info },
+	{ "pulsar,ad7699", (kernel_ulong_t)&ad7699_chip_info },
+	{ "pulsar,ad7694", (kernel_ulong_t)&ad7694_chip_info },
+	{ "pulsar,ad7693", (kernel_ulong_t)&ad7693_chip_info },
+	{ "pulsar,ad7691", (kernel_ulong_t)&ad7691_chip_info },
+	{ "pulsar,ad7690", (kernel_ulong_t)&ad7690_chip_info },
+	{ "pulsar,ad7689", (kernel_ulong_t)&ad7689_chip_info },
+	{ "pulsar,ad7688", (kernel_ulong_t)&ad7688_chip_info },
+	{ "pulsar,ad7687", (kernel_ulong_t)&ad7687_chip_info },
+	{ "pulsar,ad7686", (kernel_ulong_t)&ad7686_chip_info },
+	{ "pulsar,ad7685", (kernel_ulong_t)&ad7685_chip_info },
+	{ "pulsar,ad7684", (kernel_ulong_t)&ad7684_chip_info },
+	{ "pulsar,ad7683", (kernel_ulong_t)&ad7683_chip_info },
+	{ "pulsar,ad7682", (kernel_ulong_t)&ad7682_chip_info },
 	{ }
 
 };

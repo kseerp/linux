@@ -2264,10 +2264,12 @@ static int ad9081_setup_rx(struct spi_device *spi)
 	}
 
 	for_each_cddc(i, phy->rx_cddc_select) {
-		ret = adi_ad9081_adc_data_inversion_dc_coupling_set(&phy->ad9081,
-			BIT(i), phy->adc_invert_en[i]);
-		if (ret != 0)
-			return ret;
+		if ((conv->id == CHIPID_AD9081 || conv->id == CHIPID_AD9988) && phy->adc_invert_en[i]) {
+			ret = adi_ad9081_adc_data_inversion_dc_coupling_set(&phy->ad9081,
+				BIT(i), phy->adc_invert_en[i]);
+			if (ret != 0)
+				return ret;
+		}
 		ret = adi_ad9081_adc_ddc_coarse_gain_set(
 			&phy->ad9081, BIT(i), phy->rx_cddc_gain_6db_en[i]);
 		if (ret != 0)
@@ -4558,6 +4560,7 @@ static int ad9081_setup_chip_info_tbl(struct ad9081_phy *phy,
 
 	switch (m) {
 	case 0:
+	case 1:
 	case 2:
 	case 4:
 	case 6:
@@ -5298,9 +5301,9 @@ static int ad9081_probe(struct spi_device *spi)
 		if (ret)
 			break;
 		conv->chip_info = &phy->chip_info;
-		ret = ad9081_setup_chip_info_tbl(phy, true, true,
-			// (phy->adc_dcm[0] == 1) ? false : true,
-			// (phy->tx_main_interp == 1) ? false : true,
+		ret = ad9081_setup_chip_info_tbl(phy,
+			 (phy->adc_dcm[0] == 1) ? false : true,
+			 (phy->tx_main_interp == 1) ? false : true,
 			jesd204_dev_is_top(jdev));
 		if (ret)
 			break;
