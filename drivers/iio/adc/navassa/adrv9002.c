@@ -100,6 +100,8 @@
 #define ADRV9002_NO_EXT_LO		0xff
 #define ADRV9002_EXT_LO_FREQ_MIN	60000000
 #define ADRV9002_EXT_LO_FREQ_MAX	12000000000ULL
+#define ADRV9002_DEV_CLKOUT_MIN		(10 * MEGA)
+#define ADRV9002_DEV_CLKOUT_MAX		(80 * MEGA)
 
 /* Frequency hopping */
 #define ADRV9002_FH_TABLE_COL_SZ	7
@@ -1139,6 +1141,7 @@ static const struct iio_enum adrv9002_agc_modes_available = {
 static int adrv9002_set_ensm_mode(struct iio_dev *indio_dev,
 				  const struct iio_chan_spec *chan, u32 mode)
 {
+	adi_adrv9001_ChannelEnableMode_e pin_mode;
 	struct adrv9002_rf_phy *phy = iio_priv(indio_dev);
 	adi_common_Port_e port = ADRV_ADDRESS_PORT(chan->address);
 	const int channel = ADRV_ADDRESS_CHAN(chan->address);
@@ -1151,6 +1154,7 @@ static int adrv9002_set_ensm_mode(struct iio_dev *indio_dev,
 
 	if (adrv9002_orx_enabled(phy, chann))
 		return -EPERM;
+
 	/*
 	 * In TDD, we cannot have TX and RX enabled at the same time on the same
 	 * channel (due to TDD nature). Hence, we will return -EPERM if that is
@@ -1169,6 +1173,23 @@ static int adrv9002_set_ensm_mode(struct iio_dev *indio_dev,
 
 		if (state == ADI_ADRV9001_CHANNEL_RF_ENABLED)
 			return -EPERM;
+	}
+
+	/*
+	 * Still allow to control the radio state if the enable mode is set to pin
+	 * and if we are in control of that GPIO. Also note that in pin mode we can
+	 * only move between primed and rf_enabled. To keep the same behavior as
+	 * before, if calibrated state is requested we go and fail in
+	 * adi_adrv9001_Radio_Channel_ToState().
+	 */
+	ret = api_call(phy, adi_adrv9001_Radio_ChannelEnableMode_Get, chann->port,
+		       chann->number, &pin_mode);
+	if (ret)
+		return ret;
+
+	if (pin_mode == ADI_ADRV9001_PIN_MODE && chann->ensm && mode) {
+		gpiod_set_value_cansleep(chann->ensm, mode - 1);
+		return 0;
 	}
 
 	return api_call(phy, adi_adrv9001_Radio_Channel_ToState, port, chann->number, mode + 1);
@@ -2976,6 +2997,78 @@ static int adrv9002_tx_validate_profile(struct adrv9002_rf_phy *phy, unsigned in
 	return 0;
 }
 
+static void adrv9002_validate_device_clkout(struct adrv9002_rf_phy *phy, u32 devclk)
+{
+	unsigned long out_rate;
+
+	/* validated internally by the API for disabled case */
+	if (phy->dev_clkout_div == ADI_ADRV9001_DEVICECLOCKDIVISOR_BYPASS ||
+	    phy->dev_clkout_div == ADI_ADRV9001_DEVICECLOCKDIVISOR_DISABLED)
+		return;
+
+	/*
+	 * Ideally, this would be implemented with registering a clock provider for
+	 * dev clkout. But given that there's no API to easily change the divider or
+	 * to even get it and that ADI_ADRV9001_DEVICECLOCKDIVISOR_DISABLED pretty
+	 * much makes the internal API to decide the divider to use, it would be
+	 * cumbersome and far from ideal to implement this through CCF - we probably
+	 * would have to not allow the DISABLED option and only have a fixed clock
+	 * after profile load. Given all the limitations go the easy way. If there's
+	 * enough motivation to implement this through CCF later on, we can propose
+	 * some new internal APIs.
+	 */
+	out_rate = devclk >> phy->dev_clkout_div;
+	if (out_rate < ADRV9002_DEV_CLKOUT_MIN || out_rate > ADRV9002_DEV_CLKOUT_MAX) {
+		dev_dbg(&phy->spi->dev, "Invalid device output clk(%lu) not in [%lu %lu]\n",
+			out_rate, ADRV9002_DEV_CLKOUT_MIN, ADRV9002_DEV_CLKOUT_MAX);
+		/*
+		 * If we can't get a valid rate with the new devclk + divider, let's defer
+		 * to the internal API to try and get a valid divider that puts us in the
+		 * supported range. Not ideal if someone wants an exact output clocks but
+		 * better than failing probe. A runtime parameter for a divider does not
+		 * make sense either. Therefore, a workaround for those wanting to dynamically
+		 * change the output clock (in an exact way) is to overwrite phy->dev_clkout_div
+		 * in debugfs.
+		 */
+		phy->dev_clkout_div = ADI_ADRV9001_DEVICECLOCKDIVISOR_DISABLED;
+	}
+}
+
+static int adrv9002_validate_device_clk(struct adrv9002_rf_phy *phy,
+					const struct adi_adrv9001_ClockSettings *clk_ctrl)
+{
+	unsigned long rate;
+	long new_rate;
+	int ret;
+
+	rate = clk_get_rate(phy->dev_clk);
+	if (rate == clk_ctrl->deviceClock_kHz * KILO)
+		return 0;
+
+	/*
+	 * If they don't match let's try to set the desired ref clk. Furthermore, let's
+	 * be strict about not rounding it. If someones specifies some clk in the
+	 * profile, then we should be capable of getting exactly that exact rate.
+	 *
+	 * !NOTE: we may need some small hysteris though... but let's add one when and
+	 * if we really need one.
+	 */
+	new_rate = clk_round_rate(phy->dev_clk, clk_ctrl->deviceClock_kHz * KILO);
+	if (new_rate < 0 || new_rate != clk_ctrl->deviceClock_kHz * KILO) {
+		dev_err(&phy->spi->dev, "Cannot set ref_clk to (%lu), got (%ld)\n",
+			clk_ctrl->deviceClock_kHz * KILO, new_rate);
+		return new_rate < 0 ? new_rate : -EINVAL;
+	}
+
+	ret = clk_set_rate(phy->dev_clk, new_rate);
+	if (ret)
+		return ret;
+
+	adrv9002_validate_device_clkout(phy, new_rate);
+
+	return 0;
+}
+
 static int adrv9002_validate_profile(struct adrv9002_rf_phy *phy)
 {
 	const struct adi_adrv9001_RxChannelCfg *rx_cfg = phy->curr_profile->rx.rxChannelCfg;
@@ -2984,6 +3077,10 @@ static int adrv9002_validate_profile(struct adrv9002_rf_phy *phy)
 	unsigned long rx_mask = phy->curr_profile->rx.rxInitChannelMask;
 	unsigned long tx_mask = phy->curr_profile->tx.txInitChannelMask;
 	int i, lo, ret;
+
+	ret = adrv9002_validate_device_clk(phy, clks);
+	if (ret)
+		return ret;
 
 	for (i = 0; i < ADRV9002_CHANN_MAX; i++) {
 		struct adrv9002_rx_chan *rx = &phy->rx_channels[i];
@@ -3329,8 +3426,7 @@ static int adrv9002_setup(struct adrv9002_rf_phy *phy)
 
 	adrv9002_log_enable(&phy->adrv9001->common);
 
-	ret = api_call(phy, adi_adrv9001_InitAnalog, phy->curr_profile,
-		       ADI_ADRV9001_DEVICECLOCKDIVISOR_2);
+	ret = api_call(phy, adi_adrv9001_InitAnalog, phy->curr_profile, phy->dev_clkout_div);
 	if (ret)
 		return ret;
 
@@ -4328,13 +4424,6 @@ static int adrv9002_init_cals_coeffs_name_get(struct adrv9002_rf_phy *phy)
 	return strscpy(phy->warm_boot.coeffs_name, init_cals, sizeof(phy->warm_boot.coeffs_name));
 }
 
-static void adrv9002_clk_disable(void *data)
-{
-	struct clk *clk = data;
-
-	clk_disable_unprepare(clk);
-}
-
 static void adrv9002_of_clk_del_provider(void *data)
 {
 	struct device *dev = data;
@@ -4561,6 +4650,13 @@ int adrv9002_post_init(struct adrv9002_rf_phy *phy)
 	if (ret)
 		return ret;
 
+	/*
+	 * Validate the output devclk for the default profile. Done once in here so that we don't
+	 * have to do it everytime in adrv9002_validate_device_clk() even if the device clock did
+	 * not changed between profiles.
+	 */
+	adrv9002_validate_device_clkout(phy, phy->profile.clocks.deviceClock_kHz * KILO);
+
 	ret = adrv9002_init_cals_coeffs_name_get(phy);
 	if (ret < 0)
 		return ret;
@@ -4720,19 +4816,11 @@ static int adrv9002_get_external_los(struct adrv9002_rf_phy *phy)
 	int ret, lo;
 
 	for (lo = 0; lo < ARRAY_SIZE(phy->ext_los); lo++) {
-		phy->ext_los[lo].clk = devm_clk_get_optional(dev, ext_los[lo]);
+		phy->ext_los[lo].clk = devm_clk_get_optional_enabled(dev, ext_los[lo]);
 		if (IS_ERR(phy->ext_los[lo].clk))
 			return PTR_ERR(phy->ext_los[lo].clk);
 		if (!phy->ext_los[lo].clk)
 			continue;
-
-		ret = clk_prepare_enable(phy->ext_los[lo].clk);
-		if (ret)
-			return ret;
-
-		ret = devm_add_action_or_reset(dev, adrv9002_clk_disable, phy->ext_los[lo].clk);
-		if (ret)
-			return ret;
 
 		ret = of_clk_get_scale(np, ext_los[lo], &phy->ext_los[lo].scale);
 		if (ret) {
@@ -4748,12 +4836,7 @@ static int adrv9002_probe(struct spi_device *spi)
 {
 	struct iio_dev *indio_dev;
 	struct adrv9002_rf_phy *phy;
-	struct clk *clk = NULL;
 	int ret, c;
-
-	clk = devm_clk_get(&spi->dev, "adrv9002_ext_refclk");
-	if (IS_ERR(clk))
-		return PTR_ERR(clk);
 
 	indio_dev = devm_iio_device_alloc(&spi->dev, sizeof(*phy));
 	if (!indio_dev)
@@ -4790,17 +4873,13 @@ static int adrv9002_probe(struct spi_device *spi)
 		phy->channels[c * 2 + 1] = &phy->tx_channels[c].channel;
 	}
 
+	phy->dev_clk = devm_clk_get_enabled(&spi->dev, "adrv9002_ext_refclk");
+	if (IS_ERR(phy->dev_clk))
+		return PTR_ERR(phy->dev_clk);
+
 	phy->hal.reset_gpio = devm_gpiod_get(&spi->dev, "reset", GPIOD_OUT_LOW);
 	if (IS_ERR(phy->hal.reset_gpio))
 		return PTR_ERR(phy->hal.reset_gpio);
-
-	ret = clk_prepare_enable(clk);
-	if (ret)
-		return ret;
-
-	ret = devm_add_action_or_reset(&spi->dev, adrv9002_clk_disable, clk);
-	if (ret)
-		return ret;
 
 	ret = adrv9002_get_external_los(phy);
 	if (ret)

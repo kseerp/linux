@@ -34,6 +34,9 @@ config IIO_ALL_ADI_DRIVERS
 	imply ADXL367_SPI if SPI
 	imply ADXL372_I2C if I2C
 	imply ADXL372_SPI if SPI
+	imply ADXL380_I2C if I2C
+	imply ADXL380_SPI if SPI
+
 	imply AD400X
 	imply AD4630
 	imply AD4130
@@ -199,4 +202,4 @@ config IIO_ALL_ADI_DRIVERS
 	imply MAX11205
 	imply ADRV9025
 	imply ADL5580
-
+	imply LTC2664

@@ -159,6 +159,7 @@ struct adrv9002_chan {
 	struct clk *clk;
 	struct gpio_desc *mux_ctl;
 	struct gpio_desc *mux_ctl_2;
+	struct gpio_desc *ensm;
 	struct adrv9002_ext_lo *ext_lo;
 	u64 carrier;
 	/*
@@ -259,6 +260,7 @@ struct adrv9002_rf_phy {
 	struct gpio_desc		*reset_gpio;
 	struct gpio_desc		*ssi_sync;
 	struct iio_chan_spec		*iio_chan;
+	struct clk			*dev_clk;
 	struct adrv9002_warm_boot	warm_boot;
 	/* Protect against concurrent accesses to the device */
 	struct mutex			lock;
@@ -286,6 +288,7 @@ struct adrv9002_rf_phy {
 	struct adi_adrv9001_InitCals	init_cals;
 	bool				run_cals;
 	u32				n_clks;
+	u32				dev_clkout_div;
 	int				ngpios;
 	u8				rx2tx2;
 	/* ssi type of the axi cores - cannot really change at runtime */
