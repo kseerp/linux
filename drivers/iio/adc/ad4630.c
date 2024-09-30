@@ -72,16 +72,13 @@
 #define AD4630_SW_RESET			(BIT(0) | BIT(7))
 /* CHIP GRADE */
 #define AD4630_MSK_CHIP_GRADE		GENMASK(7, 3)
-#define AD4630_CHIP_GRADE(grade)	FIELD_GET(AD4630_MSK_CHIP_GRADE, grade)
 /* MODES */
 #define AD4630_LANE_MODE_MSK		GENMASK(7, 6)
 #define AD4630_CLK_MODE_MSK		GENMASK(5, 4)
 #define AD4630_DATA_RATE_MODE_MSK	BIT(3)
 #define AD4630_OUT_DATA_MODE_MSK	GENMASK(2, 0)
-/* EXIT_CFG_MD */
-#define AD4630_EXIT_CFG_MODE		BIT(0)
 /* AVG */
-#define AD4630_AVG_FILTER_RESET		BIT(7)
+#define AD4630_AVG_AVG_VAL		GENMASK(4, 0)
 /* OFFSET */
 #define AD4630_REG_CHAN_OFFSET(ch)	(AD4630_REG_OFFSET_X0_2 + 3 * (ch))
 /* HARDWARE_GAIN */
@@ -97,6 +94,7 @@
 /* sequence starting with "1 0 1" to enable reg access */
 #define AD4630_REG_ACCESS		0x2000
 /* Sampling timing */
+#define AD4630_TQUIET_CNV_DELAY_PS	9800
 #define AD4630_MAX_RATE_1_LANE		1750000
 #define AD4630_MAX_RATE			2000000
 
@@ -263,7 +261,7 @@ static void ad4630_get_sampling_freq(const struct ad4630_state *st, int *freq)
 	struct pwm_state conversion_state;
 
 	pwm_get_state(st->conv_trigger, &conversion_state);
-	*freq = DIV_ROUND_CLOSEST_ULL(PICO, conversion_state.period);
+	*freq = DIV_ROUND_CLOSEST_ULL(NANO, conversion_state.period);
 }
 
 static int ad4630_get_chan_gain(struct iio_dev *indio_dev, int ch, int *val)
@@ -375,15 +373,15 @@ static int ad4630_read_avail(struct iio_dev *indio_dev,
 static int __ad4630_set_sampling_freq(const struct ad4630_state *st, unsigned int freq)
 {
 	struct pwm_state conv_state = {
-		.duty_cycle = 10000,
-		.time_unit = PWM_UNIT_PSEC,
+		.duty_cycle = 10,
+		.enabled = true,
 	}, fetch_state = {
-		.duty_cycle = 10000,
-		.time_unit = PWM_UNIT_PSEC,
+		.duty_cycle = 10,
+		.enabled = true,
 	};
 	int ret;
 
-	conv_state.period =  DIV_ROUND_CLOSEST_ULL(PICO, freq);
+	conv_state.period = DIV_ROUND_CLOSEST(NSEC_PER_SEC, freq);
 	ret = pwm_apply_state(st->conv_trigger, &conv_state);
 	if (ret)
 		return ret;
@@ -400,7 +398,7 @@ static int __ad4630_set_sampling_freq(const struct ad4630_state *st, unsigned in
 		if (ret)
 			return ret;
 
-		fetch_state.period *= 1 << avg;
+		fetch_state.period <<= FIELD_GET(AD4630_AVG_AVG_VAL, avg);
 	}
 
 	/*
@@ -409,7 +407,7 @@ static int __ad4630_set_sampling_freq(const struct ad4630_state *st, unsigned in
 	 * tsync + tquiet_con_delay being tsync the conversion signal period
 	 * and tquiet_con_delay 9.8ns. Hence set the PWM phase accordingly.
 	 */
-	fetch_state.phase = fetch_state.period + 9800;
+	fetch_state.phase = AD4630_TQUIET_CNV_DELAY_PS;
 
 	return pwm_apply_state(st->fetch_trigger, &fetch_state);
 }
@@ -602,7 +600,7 @@ static int ad4630_update_sample_fetch_trigger(const struct ad4630_state *st, u32
 	pwm_get_state(st->conv_trigger, &conv_state);
 	pwm_get_state(st->fetch_trigger, &fetch_state);
 	fetch_state.period = conv_state.period * 1 << avg;
-	fetch_state.phase = fetch_state.period + 9800;
+	fetch_state.phase = AD4630_TQUIET_CNV_DELAY_PS;
 
 	return pwm_apply_state(st->fetch_trigger, &fetch_state);
 }
@@ -895,6 +893,48 @@ static const struct ad4630_out_mode ad4630_24_modes[] = {
 	}
 };
 
+static const struct ad4630_out_mode adaq4216_modes[] = {
+	[AD4630_16_DIFF] = {
+		.channels = {
+			AD4630_CHAN(0, BIT(IIO_CHAN_INFO_SCALE), 64, 16, 0, NULL),
+		},
+		.data_width = 16,
+	},
+	[AD4630_16_DIFF_8_COM] = {
+		.channels = {
+			AD4630_CHAN(0, BIT(IIO_CHAN_INFO_SCALE), 64, 16, 8, NULL),
+		},
+		.data_width = 24,
+	},
+	[AD4630_30_AVERAGED_DIFF] = {
+		.channels = {
+			AD4630_CHAN(0, BIT(IIO_CHAN_INFO_SCALE), 64, 30, 2, ad4630_ext_info),
+		},
+		.data_width = 32,
+	}
+};
+
+static const struct ad4630_out_mode adaq4220_modes[] = {
+	[AD4630_16_DIFF] = {
+		.channels = {
+			AD4630_CHAN(0, BIT(IIO_CHAN_INFO_SCALE), 64, 20, 0, NULL),
+		},
+		.data_width = 20,
+	},
+	[AD4630_16_DIFF_8_COM] = {
+		.channels = {
+			AD4630_CHAN(0, BIT(IIO_CHAN_INFO_SCALE), 64, 16, 8, NULL),
+		},
+		.data_width = 24,
+	},
+	[AD4630_30_AVERAGED_DIFF] = {
+		.channels = {
+			AD4630_CHAN(0, BIT(IIO_CHAN_INFO_SCALE), 64, 30, 2, ad4630_ext_info),
+		},
+		.data_width = 32,
+	}
+};
+
 static const struct ad4630_out_mode adaq4224_modes[] = {
 	[AD4630_24_DIFF] = {
 		.channels = {
@@ -1002,7 +1042,7 @@ static const struct ad4630_chip_info ad4630_chip_info[] = {
 	},
 	[ID_ADAQ4216] = {
 		.available_masks = ad4030_channel_masks,
-		.modes = adaq4224_modes,
+		.modes = adaq4216_modes,
 		.out_modes_mask = GENMASK(3, 0),
 		.name = "adaq4216",
 		.grade = 0x1E,
@@ -1014,7 +1054,7 @@ static const struct ad4630_chip_info ad4630_chip_info[] = {
 	},
 	[ID_ADAQ4220] = {
 		.available_masks = ad4030_channel_masks,
-		.modes = adaq4224_modes,
+		.modes = adaq4220_modes,
 		.out_modes_mask = GENMASK(3, 0),
 		.name = "adaq4220",
 		.grade = 0x1D,
@@ -1282,11 +1322,7 @@ static int ad4630_config(struct ad4630_state *st)
 	if (ret)
 		return ret;
 
-	if (lane_mode == AD4630_ONE_LANE_PER_CH && data_rate &&
-	    st->chip->modes[st->out_data].data_width == 32)
-		st->max_rate = AD4630_MAX_RATE_1_LANE;
-	else
-		st->max_rate = AD4630_MAX_RATE;
+	st->max_rate = AD4630_MAX_RATE;
 
 	ad4630_prepare_spi_sampling_msg(st, clock_mode, lane_mode, data_rate);
 
@@ -1481,7 +1517,8 @@ static int ad4630_probe(struct spi_device *spi)
 
 	ret = ad4630_config(st);
 	if (ret)
-		return ret;
+		return dev_err_probe(&spi->dev, ret,
+				     "Config failed: %d\n", ret);
 
 	if (st->pga_gpios) {
 		ad4630_fill_scale_tbl(st);
@@ -1498,7 +1535,8 @@ static int ad4630_probe(struct spi_device *spi)
 
 	ret = ad4630_pwm_get(st);
 	if (ret)
-		return ret;
+		return dev_err_probe(&spi->dev, ret,
+				     "Failed to get PWM: %d\n", ret);
 
 	indio_dev->name = st->chip->name;
 	indio_dev->info = &ad4630_info;

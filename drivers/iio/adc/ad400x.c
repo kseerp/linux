@@ -20,6 +20,8 @@
 #include <linux/spi/spi.h>
 #include <linux/spi/spi-engine.h>
 #include <linux/sysfs.h>
+#include <linux/units.h>
+#include <linux/util_macros.h>
 
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
@@ -73,10 +75,16 @@ enum ad400x_input_type {
 	DIFFERENTIAL,
 };
 
+/* Gains stored as fractions of 1000 so they can be expressed by integers. */
+static const int ad4000_gains[] = {
+	454, 909, 1000, 1900,
+};
+
 struct ad400x_chip_info {
 	struct iio_chan_spec chan_spec;
 	int max_rate;
 	enum ad400x_input_type input_type;
+	bool has_hardware_gain;
 };
 
 static const struct ad400x_chip_info ad400x_chips[] = {
@@ -154,12 +162,13 @@ static const struct ad400x_chip_info ad400x_chips[] = {
 		.chan_spec = AD400X_CHANNEL(18),
 		.max_rate  = 2000000,
 		.input_type = DIFFERENTIAL,
+		.has_hardware_gain = true,
 	},
 };
 
 struct ad400x_state {
 	struct spi_device *spi;
-	struct regulator *vref;
+	int vref_mv;
 	/* protect device accesses */
 	struct mutex lock;
 	bool bus_locked;
@@ -171,8 +180,11 @@ struct ad400x_state {
 	struct spi_transfer spi_transfer;
 
 	const struct ad400x_chip_info *chip;
+	bool span_comp;
 	bool turbo_mode;
 	bool high_z_mode;
+	u16 gain_milli;
+	int scale_tbl[2][2];
 
 	unsigned int num_bits;
 	int read_offset;
@@ -192,17 +204,41 @@ static int ad400x_get_sampling_freq(struct ad400x_state *st)
 
 static int __ad400x_set_sampling_freq(struct ad400x_state *st, int freq)
 {
-	unsigned long long ref_clk_period_ps;
 	struct pwm_state cnv_state;
+	u32 rem;
 
 	/* Sync up PWM state and prepare for pwm_apply_state(). */
 	pwm_init_state(st->cnv_trigger, &cnv_state);
 
-	ref_clk_period_ps = DIV_ROUND_CLOSEST_ULL(1000000000000,
-						  st->ref_clk_rate);
-	cnv_state.period = DIV_ROUND_CLOSEST_ULL(1000000000000, freq);
-	cnv_state.duty_cycle = ref_clk_period_ps;
-	cnv_state.time_unit = PWM_UNIT_PSEC;
+	/*
+	 * The goal here is that the PWM is configured with a minimal period not
+	 * less than 1 / freq (with freq measured in Hz). It should not be less
+	 * because freq is usually st->chip->max_rate which is a hard limit.
+	 *
+	 * When a period P (measured in ns) is passed to pwm_apply_state(), the
+	 * actually implemented period is:
+	 *
+	 * 	round_down(P * R / NSEC_PER_SEC) / R
+	 *
+	 * (measured in s) with R = st->ref_clk_rate. So we have:
+	 *
+	 * 	  round_down(P * R / NSEC_PER_SEC) / R ≥ 1 / freq
+	 * 	⟺ round_down(P * R / NSEC_PER_SEC) ≥ R / freq
+	 *
+	 * With the LHS being integer this is equivalent to:
+	 *
+	 * 	  round_down(P * R / NSEC_PER_SEC) ≥ round_up(R / freq)
+	 * 	⟺ P * R / NSEC_PER_SEC ≥ round_up(R / freq)
+	 * 	⟺ P ≥ round_up(R / freq) * NSEC_PER_SEC / R
+	 */
+
+	cnv_state.period = div_u64_rem((u64)DIV_ROUND_UP(st->ref_clk_rate, freq) * NSEC_PER_SEC,
+				       st->ref_clk_rate, &rem);
+	if (rem)
+		cnv_state.period += 1;
+
+	cnv_state.duty_cycle = DIV_ROUND_UP(NSEC_PER_SEC, st->ref_clk_rate);
+
 	return pwm_apply_state(st->cnv_trigger, &cnv_state);
 }
 
@@ -225,6 +261,48 @@ static int ad400x_set_sampling_freq(struct iio_dev *indio_dev, unsigned int freq
 	iio_device_release_direct_mode(indio_dev);
 
 	return ret;
+}
+
+static void ad4000_fill_scale_tbl(struct ad400x_state *st,
+				  struct iio_chan_spec const *chan)
+{
+	int val, tmp0, tmp1;
+	int scale_bits;
+	u64 tmp2;
+
+	/*
+	 * ADCs that output two's complement code have one less bit to express
+	 * voltage magnitude.
+	 */
+	if (chan->scan_type.sign == 's')
+		scale_bits = chan->scan_type.realbits - 1;
+	else
+		scale_bits = chan->scan_type.realbits;
+
+	/*
+	 * The gain is stored as a fraction of 1000 and, as we need to
+	 * divide vref_mv by the gain, we invert the gain/1000 fraction.
+	 * Also multiply by an extra MILLI to preserve precision.
+	 * Thus, we have MILLI * MILLI equals MICRO as fraction numerator.
+	 */
+	val = mult_frac(st->vref_mv, MICRO, st->gain_milli);
+
+	/* Would multiply by NANO here but we multiplied by extra MILLI */
+	tmp2 = shift_right((u64)val * MICRO, scale_bits);
+	tmp0 = div_s64_rem(tmp2, NANO, &tmp1);
+
+	/* Store scale for when span compression is disabled */
+	st->scale_tbl[0][0] = tmp0; /* Integer part */
+	st->scale_tbl[0][1] = abs(tmp1); /* Fractional part */
+
+	/* Store scale for when span compression is enabled */
+	st->scale_tbl[1][0] = tmp0;
+
+	/* The integer part is always zero so don't bother to divide it. */
+	if (chan->differential)
+		st->scale_tbl[1][1] = DIV_ROUND_CLOSEST(abs(tmp1) * 4, 5);
+	else
+		st->scale_tbl[1][1] = DIV_ROUND_CLOSEST(abs(tmp1) * 9, 10);
 }
 
 static int ad400x_write_reg(struct ad400x_state *st, uint8_t val)
@@ -356,20 +434,14 @@ static int ad400x_read_raw(struct iio_dev *indio_dev,
 	struct iio_chan_spec const *chan, int *val, int *val2, long info)
 {
 	struct ad400x_state *st = iio_priv(indio_dev);
-	int ret;
 
 	switch (info) {
 	case IIO_CHAN_INFO_RAW:
 		return ad400x_single_conversion(indio_dev, chan, val);
 	case IIO_CHAN_INFO_SCALE:
-		ret = regulator_get_voltage(st->vref);
-		if (ret < 0)
-			return ret;
-
-		*val = ret / 1000;
-		*val2 = chan->scan_type.realbits;
-
-		return IIO_VAL_FRACTIONAL_LOG2;
+		*val = st->scale_tbl[st->span_comp][0];
+		*val2 = st->scale_tbl[st->span_comp][1];
+		return IIO_VAL_INT_PLUS_NANO;
 	case IIO_CHAN_INFO_SAMP_FREQ:
 		*val = ad400x_get_sampling_freq(st);
 		return IIO_VAL_INT;
@@ -531,9 +603,10 @@ static int ad400x_pwm_setup(struct spi_device *spi, struct ad400x_state *st)
 static int ad400x_probe(struct spi_device *spi)
 {
 	const struct ad400x_chip_info *chip;
+	struct regulator *vref_reg;
 	struct ad400x_state *st;
 	struct iio_dev *indio_dev;
-	int ret;
+	int gain_idx, ret;
 
 	indio_dev = devm_iio_device_alloc(&spi->dev, sizeof(*st));
 	if (!indio_dev)
@@ -548,17 +621,23 @@ static int ad400x_probe(struct spi_device *spi)
 	st->spi = spi;
 	mutex_init(&st->lock);
 
-	st->vref = devm_regulator_get(&spi->dev, "vref");
-	if (IS_ERR(st->vref))
-		return PTR_ERR(st->vref);
+	vref_reg = devm_regulator_get(&spi->dev, "vref");
+	if (IS_ERR(vref_reg))
+		return PTR_ERR(vref_reg);
 
-	ret = regulator_enable(st->vref);
+	ret = regulator_enable(vref_reg);
 	if (ret < 0)
 		return ret;
 
-	ret = devm_add_action_or_reset(&spi->dev, ad400x_regulator_disable, st->vref);
+	ret = devm_add_action_or_reset(&spi->dev, ad400x_regulator_disable, vref_reg);
 	if (ret)
 		return ret;
+
+	ret = regulator_get_voltage(vref_reg);
+	if (ret < 0)
+		return dev_err_probe(&spi->dev, ret, "Failed to get vref\n");
+
+	st->vref_mv = ret / 1000;
 
 	indio_dev->dev.parent = &spi->dev;
 	indio_dev->name = spi_get_device_id(spi)->name;
@@ -574,6 +653,23 @@ static int ad400x_probe(struct spi_device *spi)
 	ret = ad400x_set_mode(st);
 	if (ret < 0)
 		return ret;
+	st->span_comp = 0; /* Span Compression not supported yet */
+	st->gain_milli = 1000;
+	if (chip->has_hardware_gain) {
+		ret = device_property_read_u16(&spi->dev, "adi,gain-milli",
+					       &st->gain_milli);
+		if (!ret) {
+			/* Match gain value from dt to one of supported gains */
+			gain_idx = find_closest(st->gain_milli, ad4000_gains,
+						ARRAY_SIZE(ad4000_gains));
+			st->gain_milli = ad4000_gains[gain_idx];
+		} else {
+			return dev_err_probe(&spi->dev, ret,
+					     "Failed to read gain property\n");
+		}
+	}
+
+	ad4000_fill_scale_tbl(st, indio_dev->channels);
 
 	if (spi_engine_offload_supported(spi)) {
 		ret = devm_iio_dmaengine_buffer_setup(indio_dev->dev.parent,
