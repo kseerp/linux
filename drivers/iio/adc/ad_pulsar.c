@@ -20,7 +20,7 @@
 #include <linux/property.h>
 #include <linux/pwm.h>
 #include <linux/spi/spi.h>
-#include <linux/spi/spi-engine.h>
+#include <linux/spi/legacy-spi-engine.h>
 #include <linux/regulator/consumer.h>
 
 #include <linux/iio/buffer.h>
@@ -426,21 +426,37 @@ static int ad_pulsar_set_samp_freq(struct ad_pulsar_adc *adc, int freq)
 	unsigned long long ref_clk_period_ns;
 	struct pwm_state cnv_state;
 	int ret;
+	u32 rem;
 
 	/*
 	 * The objective here is to configure the PWM such that we don't have
 	 * more than $freq periods per second and duty_cycle and phase should be
 	 * their minimal positive value.
+	 *
+	 * When a period P (measured in ns) is passed to pwm_apply_state(), the
+	 * actually implemented period is:
+	 *
+	 * 	round_down(P * R / NSEC_PER_SEC) / R
+	 *
+	 * (measured in s) with R = adc->ref_clk_rate. We want
+	 *
+	 * 	  round_down(P * R / NSEC_PER_SEC) / R ≥ 1 / freq
+	 *	⟺ round_down(P * R / NSEC_PER_SEC) ≥ R / freq
+	 *	⟺ P * R / NSEC_PER_SEC ≥ round_up(R / freq)
+	 *	⟺ P ≥ round_up(R / freq) * NSEC_PER_SEC / R
 	 */
 	freq = clamp(freq, 1, adc->info->max_rate);
 	ref_clk_period_ns = DIV_ROUND_UP(NSEC_PER_SEC, adc->ref_clk_rate);
 
 	cnv_state = (struct pwm_state){
-		.period = DIV_ROUND_UP(NSEC_PER_SEC, freq),
 		.duty_cycle = ref_clk_period_ns,
-		.phase = ref_clk_period_ns,
 		.enabled = true,
 	};
+
+	cnv_state.period = div_u64_rem((u64)DIV_ROUND_UP(adc->ref_clk_rate, freq) * NSEC_PER_SEC,
+				       adc->ref_clk_rate, &rem);
+	if (rem)
+		cnv_state.period += 1;
 
 	ret = pwm_apply_state(adc->cnv, &cnv_state);
 	if (ret)
@@ -679,11 +695,11 @@ static int ad_pulsar_buffer_preenable(struct iio_dev *indio_dev)
 		return ret;
 
 	spi_bus_lock(adc->spi->master);
-	ret = spi_engine_offload_load_msg(adc->spi, &msg);
+	ret = legacy_spi_engine_offload_load_msg(adc->spi, &msg);
 	if (ret)
 		return ret;
 
-	spi_engine_offload_enable(adc->spi, true);
+	legacy_spi_engine_offload_enable(adc->spi, true);
 
 	return 0;
 }
@@ -693,7 +709,7 @@ static int ad_pulsar_buffer_postdisable(struct iio_dev *indio_dev)
 	struct ad_pulsar_adc *adc = iio_priv(indio_dev);
 	int ret;
 
-	spi_engine_offload_enable(adc->spi, false);
+	legacy_spi_engine_offload_enable(adc->spi, false);
 	spi_bus_unlock(adc->spi->master);
 
 	ret = ad_pulsar_reg_write(adc, AD7682_REG_CONFIG, AD7682_DISABLE_SEQ);
@@ -915,8 +931,7 @@ static int ad_pulsar_probe(struct spi_device *spi)
 	indio_dev->setup_ops = &ad_pulsar_buffer_ops;
 
 	ret = devm_iio_dmaengine_buffer_setup(indio_dev->dev.parent,
-					      indio_dev, "rx",
-					      IIO_BUFFER_DIRECTION_IN);
+					      indio_dev, "rx");
 	if (ret)
 		return ret;
 

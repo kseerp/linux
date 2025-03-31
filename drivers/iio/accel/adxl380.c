@@ -1075,11 +1075,11 @@ static IIO_DEVICE_ATTR(hwfifo_watermark, 0444,
 static IIO_DEVICE_ATTR(hwfifo_enabled, 0444,
 		       adxl380_get_fifo_enabled, NULL, 0);
 
-static const struct attribute *adxl380_fifo_attributes[] = {
-	&iio_dev_attr_hwfifo_watermark_min.dev_attr.attr,
-	&iio_dev_attr_hwfifo_watermark_max.dev_attr.attr,
-	&iio_dev_attr_hwfifo_watermark.dev_attr.attr,
-	&iio_dev_attr_hwfifo_enabled.dev_attr.attr,
+static const struct iio_dev_attr *adxl380_fifo_attributes[] = {
+	&iio_dev_attr_hwfifo_watermark_min,
+	&iio_dev_attr_hwfifo_watermark_max,
+	&iio_dev_attr_hwfifo_watermark,
+	&iio_dev_attr_hwfifo_enabled,
 	NULL
 };
 
@@ -1181,7 +1181,7 @@ static int adxl380_read_raw(struct iio_dev *indio_dev,
 			return ret;
 
 		ret = adxl380_read_chn(st, chan->address);
-		if (ret)
+		if (ret < 0)
 			return ret;
 
 		iio_device_release_direct_mode(indio_dev);

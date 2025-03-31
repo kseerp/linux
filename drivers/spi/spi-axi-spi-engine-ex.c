@@ -50,6 +50,7 @@
 #define SPI_ENGINE_CONFIG_CPHA			BIT(0)
 #define SPI_ENGINE_CONFIG_CPOL			BIT(1)
 #define SPI_ENGINE_CONFIG_3WIRE			BIT(2)
+#define SPI_ENGINE_CONFIG_SDO_IDLE_HIGH		BIT(3)
 
 #define SPI_ENGINE_INST_TRANSFER		0x0
 #define SPI_ENGINE_INST_ASSERT			0x1
@@ -146,6 +147,10 @@ static unsigned int spi_engine_get_config(struct spi_device *spi)
 		config |= SPI_ENGINE_CONFIG_CPHA;
 	if (spi->mode & SPI_3WIRE)
 		config |= SPI_ENGINE_CONFIG_3WIRE;
+	if (spi->mode & SPI_MOSI_IDLE_HIGH)
+		config |= SPI_ENGINE_CONFIG_SDO_IDLE_HIGH;
+	if (spi->mode & SPI_MOSI_IDLE_LOW)
+		config &= ~SPI_ENGINE_CONFIG_SDO_IDLE_HIGH;
 
 	return config;
 }
@@ -369,7 +374,17 @@ int spi_engine_ex_offload_load_msg(struct spi_device *spi,
 
 	/* TODO: validate that we don't exceed the offload SDO FIFO size */
 	list_for_each_entry(xfer, &msg->transfers, transfer_list) {
-		if (!xfer->tx_buf)
+		/*
+		 * To allow offload to stream a "tx" type of xfer we need the write flag
+		 * set but no messages on the SDO memory of the offload engine. but the
+		 * current code relies on the tx_buf pointer for both of these operations,
+		 * so there is no way to separate the two. So we use a pointer value of
+		 * -1 as flag to indicate this is a tx stream type of xfer not fot the fifo.
+		 * the work-in-progress offload will handle this with proper flags in
+		 * the core spi structures, So while that is merged upstream use this
+		 * workaround for DAC offload.
+		 */
+		if (!xfer->tx_buf || xfer->tx_buf == (void *)-1)
 			continue;
 
 		if (xfer->bits_per_word <= 8) {
@@ -785,9 +800,13 @@ static int spi_engine_probe(struct platform_device *pdev)
 	host->num_chipselect = 8;
 
 	/* Some features depend of the IP core version. */
-	if (ADI_AXI_PCORE_VER_MINOR(version) >= 2) {
-		host->mode_bits |= SPI_CS_HIGH;
-		host->setup = spi_engine_setup;
+	if (ADI_AXI_PCORE_VER_MAJOR(version) >= 1) {
+		if (ADI_AXI_PCORE_VER_MINOR(version) >= 2) {
+			host->mode_bits |= SPI_CS_HIGH;
+			host->setup = spi_engine_setup;
+		}
+		if (ADI_AXI_PCORE_VER_MINOR(version) >= 3)
+			host->mode_bits |= SPI_MOSI_IDLE_LOW | SPI_MOSI_IDLE_HIGH;
 	}
 
 	if (host->max_speed_hz == 0)

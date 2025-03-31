@@ -198,6 +198,7 @@ build_check_new_file_license() {
 }
 
 __setup_dummy_git_account() {
+	[ "${LOCAL_BUILD}" == "y" ] && return 0
 	# setup an email account so that we can cherry-pick stuff
 	git config user.name "CSE CI"
 	git config user.email "cse-ci-notifications@analog.com"
@@ -246,7 +247,7 @@ build_default() {
 	# Also note that this is only an issue for ARM...
 	#
 	# We should keep an eye on this (every time we upgrade) so we can remove this as soon as possible...
-	[ "$ARCH" = "arm" ] && {
+	[ "$ARCH" = "arm" ] && [ "$LOCAL_BUILD" != "y" ] && {
 		sed -i  '/CONFIG_GCC_PLUGINS/d' arch/arm/configs/$DEFCONFIG
 		__setup_dummy_git_account
 		# don't error out if the commit fails as we don't explicitly disable the plugins for
@@ -334,7 +335,11 @@ build_dt_binding_check() {
 	fi
 
 	# install dt_binding_check dependencies
-	[ "${LOCAL_BUILD}" == "y" ] || pip3 install dtschema
+	apt_install pipx
+	[ "${LOCAL_BUILD}" == "y" ] || {
+		pipx install dtschema
+		PATH=$PATH:$HOME/.local/bin/
+	}
 
 	__update_git_ref "${ref_branch}" "${ref_branch}"
 
@@ -536,7 +541,7 @@ __handle_sync_with_main() {
 
 build_sync_branches_with_main() {
 	GIT_FETCH_DEPTH=50
-	BRANCHES="adi-6.1.0 rpi-6.1.y"
+	BRANCHES="adi-6.6.0 rpi-6.6.y"
 
 	__update_git_ref "$MAIN_BRANCH" "$MAIN_BRANCH" || {
 		__echo_red "Could not fetch branch '$MAIN_BRANCH'"

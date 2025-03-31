@@ -186,6 +186,7 @@ struct adrv9002_rx_chan {
 	struct adi_adrv9001_RxGainControlPinCfg *pin_cfg;
 	struct clk *tdd_clk;
 	struct gpio_desc *orx_gpio;
+	enum adi_adrv9001_RxRfInputSel manual_port;
 	u8 orx_en;
 #ifdef CONFIG_DEBUG_FS
 	struct adi_adrv9001_RxSsiTestModeCfg ssi_test;
@@ -216,15 +217,6 @@ struct adrv9002_tx_chan {
 struct adrv9002_gpio {
 	struct adi_adrv9001_GpioCfg gpio;
 	u32 signal;
-};
-
-struct adrv9002_fh_bin_table {
-	/*
-	 * page size should be more than enough for a max of 64 entries!
-	 * +1 so we the table can be properly NULL terminated.
-	 */
-	u8 bin_table[PAGE_SIZE + 1];
-	adi_adrv9001_FhHopFrame_t hop_tbl[ADI_ADRV9001_FH_MAX_HOP_TABLE_SIZE];
 };
 
 #define to_clk_priv(_hw) container_of(_hw, struct adrv9002_clock, hw)
@@ -274,7 +266,6 @@ struct adrv9002_rf_phy {
 	char				*bin_attr_buf;
 	u8				*stream_buf;
 	u16				stream_size;
-	struct adrv9002_fh_bin_table	fh_table_bin_attr;
 	adi_adrv9001_FhCfg_t		fh;
 	struct adrv9002_rx_chan		rx_channels[ADRV9002_CHANN_MAX];
 	struct adrv9002_tx_chan		tx_channels[ADRV9002_CHANN_MAX];
@@ -286,6 +277,7 @@ struct adrv9002_rf_phy {
 	struct adi_adrv9001_Init	*curr_profile;
 	struct adi_adrv9001_Init	profile;
 	struct adi_adrv9001_InitCals	init_cals;
+	struct adi_adrv9001_RxPortSwitchCfg port_switch;
 	bool				run_cals;
 	u32				n_clks;
 	u32				dev_clkout_div;
@@ -312,7 +304,8 @@ int adrv9002_intf_test_cfg(const struct adrv9002_rf_phy *phy, const int chann, c
 int adrv9002_check_tx_test_pattern(const struct adrv9002_rf_phy *phy, const int chann);
 int adrv9002_intf_change_delay(const struct adrv9002_rf_phy *phy, const int channel, u8 clk_delay,
 			       u8 data_delay, const bool tx);
-int adrv9002_tx2_fixup(const struct adrv9002_rf_phy *phy);
+int adrv9002_tx_fixup(const struct adrv9002_rf_phy *phy, unsigned int chan);
+int adrv9002_tx_fixup_all(const struct adrv9002_rf_phy *phy);
 adi_adrv9001_SsiTestModeData_e adrv9002_get_test_pattern(const struct adrv9002_rf_phy *phy,
 							 unsigned int chan, bool rx, bool stop);
 /* phy lock must be held before entering the API */
